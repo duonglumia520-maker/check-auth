@@ -27,7 +27,7 @@ except:
 def ghi_log(user, code, status):
     time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{time_str}] Người dùng: {user} | Mã: {code} | Trạng thái: {status}\n"
-    with open(LOG_PATH, "a") as f:
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(log_line)
 
 # Kiểm tra mã đã dùng
@@ -65,7 +65,6 @@ def check_code():
         return jsonify({"status": "error", "message": "Mã đã bị người khác dùng"}), 403
 
     elif status == "expired":
-        # Xóa mã khỏi hệ thống
         VALID_CODES.remove(code)
         with open(CODES_PATH, "w") as f:
             json.dump(VALID_CODES, f)
@@ -95,11 +94,13 @@ def check_code():
 @app.route('/log', methods=['GET'])
 def get_log():
     try:
-        with open(LOG_PATH, "r") as f:
+        with open(LOG_PATH, "r", encoding="utf-8") as f:
             content = f.read()
         return jsonify({"log": content}), 200
     except:
         return jsonify({"error": "Không có log"}), 404
 
+# ✅ Sửa phần này để Render nhận PORT
 if __name__ == '__main__':
-    app.run()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
