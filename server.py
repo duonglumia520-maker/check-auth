@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import json
-from datetime import datetime
+from datetime import datetime, timedelta # ✅ Thêm timedelta để tính toán thời gian
 import os
 
 app = Flask(__name__)
@@ -42,12 +42,25 @@ def check_code():
         return jsonify({"status": "error", "message": "Mã không hợp lệ"}), 403
 
     if code in USED_CODES:
-        if USED_CODES[code]["user"] != user:
+        used_info = USED_CODES[code]
+        if used_info["user"] != user:
             ghi_log(user, code, "❌ mã đã bị người khác dùng")
             return jsonify({"status": "error", "message": "Mã đã bị người khác dùng"}), 403
         else:
-            ghi_log(user, code, "✅ hợp lệ (đã dùng bởi chính người đó)")
-            return jsonify({"status": "ok", "message": "Mã hợp lệ"}), 200
+            # ⭐ SỬA ĐỔI: Thêm logic kiểm tra 24 giờ
+            try:
+                used_time = datetime.strptime(used_info["time"], "%Y-%m-%d %H:%M:%S")
+                # Nếu thời gian đã dùng + 24 giờ mà vẫn nhỏ hơn thời gian hiện tại -> Mã đã hết hạn
+                if used_time + timedelta(hours=24) < datetime.now():
+                    ghi_log(user, code, "❌ mã đã hết hạn sau 24 giờ")
+                    return jsonify({"status": "error", "message": "Mã đã hết hạn"}), 403
+                else:
+                    ghi_log(user, code, "✅ hợp lệ (đã dùng bởi chính người đó, còn hạn)")
+                    return jsonify({"status": "ok", "message": "Mã hợp lệ"}), 200
+            except (ValueError, KeyError):
+                # Xử lý trường hợp dữ liệu cũ không có 'time' hoặc định dạng sai
+                ghi_log(user, code, "⚠️ lỗi định dạng thời gian, chấp nhận tạm thời")
+                return jsonify({"status": "ok", "message": "Mã hợp lệ (lỗi định dạng thời gian)"}), 200
 
     # Lưu mã đã dùng
     USED_CODES[code] = {
