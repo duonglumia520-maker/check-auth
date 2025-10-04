@@ -14,7 +14,7 @@ LOG_PATH = "log.txt"
 LOG_ACCESS_SECRET = "43991201" 
 
 # Lấy Chuỗi Kết nối DB từ biến môi trường (CẦN ĐẶT TRÊN RENDER: DATABASE_URL)
-DATABASE_URL = os.environ.get("postgresql://code_admin:vqudQYhzj2uyIlDOC77CUuV5L6wJURJV@dpg-d3gd6th5pdvs73edall0-a/code_data")
+DATABASE_URL = os.environ.get("code_admin:DATABASE_URL")
 
 # Khóa để ngăn chặn race condition khi ghi file/DB
 file_lock = threading.Lock()
