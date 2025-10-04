@@ -325,7 +325,7 @@ def get_log():
 # Cho phép Render chạy đúng cổng
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)        }
+    app.run(host="0.0.0.0", port=port)        
         with open(USED_PATH, "w") as f:
             json.dump(USED_CODES, f, indent=2)
 
