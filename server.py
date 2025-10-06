@@ -135,6 +135,7 @@ def xoa_ma_khoi_codes_json(code_to_delete, current_codes_list):
 
 
 # --- ENDPOINT CHÍNH: /check ---
+# (Giữ nguyên trả về JSON)
 
 @app.route('/check', methods=['POST'])
 def check_code():
@@ -229,13 +230,14 @@ def get_db_logs():
     # Kiểm tra mật khẩu bí mật
     secret_key = request.args.get('secret')
     if secret_key != LOG_ACCESS_SECRET:
-        return jsonify({"error": "Truy cập bị từ chối"}), 403
+        # Trả về Plain Text lỗi
+        return "Truy cập bị từ chối.", 403, {'Content-Type': 'text/plain'}
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Truy vấn 30 bản ghi log gần nhất (sắp xếp theo thời gian giảm dần)
+        # Truy vấn 30 bản ghi log gần nhất
         cur.execute("""
             SELECT log_time, user_id, code, status
             FROM auth_logs
@@ -244,21 +246,36 @@ def get_db_logs():
         """, (DISPLAY_LOG_ENTRIES,))
         logs_raw = cur.fetchall()
         
-        # Chuyển đổi kết quả sang định dạng JSON
-        logs = []
-        for log in logs_raw:
-            logs.append({
-                "time": log[0].strftime("%Y-%m-%d %H:%M:%S"),
-                "user_id": log[1],
-                "code": log[2] or "N/A", 
-                "status": log[3]
-            })
+        # ⭐ TẠO CHUỖI VĂN BẢN (TXT) CHO LOG XÁC THỰC (Đã tối ưu căn chỉnh) ⭐
+        log_lines = ["--- LOG XÁC THỰC GẦN ĐÂY NHẤT ---", f"Thời gian server: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ""]
+        
+        # Định dạng Header
+        header = f"| {'Thời Gian':<20} | {'User ID':<20} | {'Code':<25} | {'Trạng Thái':<50} |"
+        separator = "-" * len(header)
+        log_lines.extend([header, separator])
 
-        return jsonify({"status": "ok", "logs": logs}), 200
+        # Định dạng từng dòng Log
+        for log in logs_raw:
+            log_time = log[0].strftime("%Y-%m-%d %H:%M:%S")
+            user_id = log[1]
+            code = log[2] or "N/A"
+            # Thay thế ký tự xuống dòng/khoảng trắng trong status để căn chỉnh không bị lệch
+            status = log[3].replace('\n', ' ').replace('\r', ' ') 
+            
+            line = f"| {log_time:<20} | {user_id:<20} | {code:<25} | {status:<50} |"
+            log_lines.append(line)
+
+        log_lines.append(separator)
+        
+        final_log_text = "\n".join(log_lines)
+
+        # TRẢ VỀ VĂN BẢN THUẦN TÚY (Plain Text)
+        return final_log_text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     
     except Exception as e:
         print(f"LỖI khi truy vấn log từ DB: {e}")
-        return jsonify({"status": "error", "message": "Lỗi truy vấn log nội bộ"}), 500
+        # Trả về lỗi dưới dạng Plain Text
+        return f"LỖI NỘI BỘ: Không thể truy vấn log. Lỗi: {e}", 500, {'Content-Type': 'text/plain'}
     finally:
         if cur: cur.close()
         if conn: conn.close()
@@ -290,7 +307,8 @@ def get_active_codes():
     # Kiểm tra mật khẩu bí mật
     secret_key = request.args.get('secret')
     if secret_key != LOG_ACCESS_SECRET:
-        return jsonify({"error": "Truy cập bị từ chối"}), 403
+        # Trả về Plain Text lỗi
+        return "Truy cập bị từ chối.", 403, {'Content-Type': 'text/plain'}
 
     try:
         conn = get_db_connection()
@@ -306,7 +324,9 @@ def get_active_codes():
         """)
         active_raw = cur.fetchall()
         
-        active_codes_list = []
+        # ⭐ TẠO CHUỖI VĂN BẢN (TXT) CHO MÃ HOẠT ĐỘNG (Đã tối ưu căn chỉnh) ⭐
+        active_count = 0
+        active_lines = []
         
         for record in active_raw:
             code, user_id, used_at = record
@@ -316,18 +336,36 @@ def get_active_codes():
             
             # Chỉ thêm vào danh sách nếu mã thực sự còn hạn 24 giờ
             if time_remaining > timedelta(0):
-                active_codes_list.append({
-                    "code": code,
-                    "user_id": user_id,
-                    "activated_at": used_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "time_remaining": format_timedelta(time_remaining)
-                })
+                active_count += 1
+                
+                # Định dạng log
+                activated_at = used_at.strftime("%Y-%m-%d %H:%M:%S")
+                time_left = format_timedelta(time_remaining)
+                
+                # Kích thước cột tối ưu hơn cho hiển thị TXT
+                line = f"| {code:<25} | {user_id:<20} | {activated_at:<20} | {time_left:<25} |"
+                active_lines.append(line)
 
-        return jsonify({"status": "ok", "active_codes": active_codes_list, "total_active": len(active_codes_list)}), 200
+        
+        log_lines = ["--- DANH SÁCH MÃ ĐANG HOẠT ĐỘNG (ACTIVE) ---", 
+                     f"Tổng cộng: {active_count} mã còn hạn.", ""]
+        
+        # Định dạng Header
+        header = f"| {'Code':<25} | {'User ID Kích Hoạt':<20} | {'Kích Hoạt Lúc':<20} | {'Thời Gian Còn Lại':<25} |"
+        separator = "-" * len(header)
+        log_lines.extend([header, separator])
+        log_lines.extend(active_lines)
+        log_lines.append(separator)
+        
+        final_log_text = "\n".join(log_lines)
+        
+        # TRẢ VỀ VĂN BẢN THUẦN TÚY (Plain Text)
+        return final_log_text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     
     except Exception as e:
         print(f"LỖI khi truy vấn mã ACTIVE từ DB: {e}")
-        return jsonify({"status": "error", "message": "Lỗi truy vấn mã ACTIVE nội bộ"}), 500
+        # Trả về lỗi dưới dạng Plain Text
+        return f"LỖỖI NỘI BỘ: Không thể truy vấn mã ACTIVE. Lỗi: {e}", 500, {'Content-Type': 'text/plain'}
     finally:
         if cur: cur.close()
         if conn: conn.close()
