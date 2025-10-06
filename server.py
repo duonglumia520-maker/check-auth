@@ -10,7 +10,6 @@ app = Flask(__name__)
 
 # --- CẤU HÌNH PATH & BÍ MẬT ---
 CODES_PATH = "codes.json"
-# LOG_PATH đã bị loại bỏ vì Log được lưu vào DB
 LOG_ACCESS_SECRET = "43991201" 
 
 # Giới hạn số lượng Log trong Database (Lưu không quá 50 dòng)
@@ -121,8 +120,6 @@ with app.app_context():
 
 # --- CHỨC NĂNG FILE SYSTEM ---
 
-# Hàm ghi log cũ (ghi_log) đã được loại bỏ
-
 def xoa_ma_khoi_codes_json(code_to_delete, current_codes_list):
     """Xóa mã khỏi codes.json sau lần kích hoạt đầu tiên (Dùng 1 Lần)."""
     try:
@@ -222,7 +219,7 @@ def check_code():
         if conn: conn.close()
 
 
-# --- ENDPOINT MỚI: XEM LOG XÁC THỰC TỪ DB (/logs) ---
+# --- ENDPOINT 1: XEM LOG XÁC THỰC TỪ DB (/logs) ---
 
 @app.route('/logs', methods=['GET'])
 def get_db_logs():
@@ -253,7 +250,7 @@ def get_db_logs():
             logs.append({
                 "time": log[0].strftime("%Y-%m-%d %H:%M:%S"),
                 "user_id": log[1],
-                "code": log[2] or "N/A", # Mã có thể là NULL trong một số trường hợp log
+                "code": log[2] or "N/A", 
                 "status": log[3]
             })
 
@@ -267,7 +264,74 @@ def get_db_logs():
         if conn: conn.close()
 
 
-# --- ENDPOINT LOG CŨ (/log) BỊ LOẠI BỎ ---
+# --- ENDPOINT 2: XEM MÃ ĐANG HOẠT ĐỘNG VÀ CÒN HẠN (/active_codes) ---
+
+def format_timedelta(td):
+    """Định dạng timedelta thành chuỗi D:H:M:S."""
+    total_seconds = int(td.total_seconds())
+    if total_seconds <= 0:
+        return "00:00:00"
+    
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    
+    if days > 0:
+        return f"{days} ngày {hours:02d} giờ {minutes:02d} phút"
+    else:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+@app.route('/active_codes', methods=['GET'])
+def get_active_codes():
+    conn = None
+    cur = None
+    
+    # Kiểm tra mật khẩu bí mật
+    secret_key = request.args.get('secret')
+    if secret_key != LOG_ACCESS_SECRET:
+        return jsonify({"error": "Truy cập bị từ chối"}), 403
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        now = datetime.now()
+        
+        # Chỉ truy vấn các mã đang ACTIVE
+        cur.execute("""
+            SELECT code, user_id, used_at
+            FROM code_status
+            WHERE status = 'ACTIVE'
+            ORDER BY used_at DESC;
+        """)
+        active_raw = cur.fetchall()
+        
+        active_codes_list = []
+        
+        for record in active_raw:
+            code, user_id, used_at = record
+            
+            expiry_time = used_at + timedelta(hours=24)
+            time_remaining = expiry_time - now
+            
+            # Chỉ thêm vào danh sách nếu mã thực sự còn hạn 24 giờ
+            if time_remaining > timedelta(0):
+                active_codes_list.append({
+                    "code": code,
+                    "user_id": user_id,
+                    "activated_at": used_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "time_remaining": format_timedelta(time_remaining)
+                })
+
+        return jsonify({"status": "ok", "active_codes": active_codes_list, "total_active": len(active_codes_list)}), 200
+    
+    except Exception as e:
+        print(f"LỖI khi truy vấn mã ACTIVE từ DB: {e}")
+        return jsonify({"status": "error", "message": "Lỗi truy vấn mã ACTIVE nội bộ"}), 500
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
 
 # Cho phép Render chạy đúng cổng
 if __name__ == '__main__':
