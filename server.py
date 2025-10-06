@@ -3,17 +3,22 @@ import json
 from datetime import datetime, timedelta
 import os
 import threading
-import psycopg2 # ✅ Thư viện cho PostgreSQL
-import sys # Để xử lý lỗi khởi tạo DB
+import psycopg2 
+import sys 
 
 app = Flask(__name__)
 
 # --- CẤU HÌNH PATH & BÍ MẬT ---
 CODES_PATH = "codes.json"
-LOG_PATH = "log.txt"
+# LOG_PATH đã bị loại bỏ vì Log được lưu vào DB
 LOG_ACCESS_SECRET = "43991201" 
 
-# Lấy Chuỗi Kết nối DB từ biến môi trường (CẦN ĐẶT TRÊN RENDER: DATABASE_URL)
+# Giới hạn số lượng Log trong Database (Lưu không quá 50 dòng)
+MAX_LOG_ENTRIES = 50
+# Số lượng Log hiển thị trên Web
+DISPLAY_LOG_ENTRIES = 30
+
+# Lấy Chuỗi Kết nối DB từ biến môi trường
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Khóa để ngăn chặn race condition khi ghi file/DB
@@ -27,19 +32,18 @@ def get_db_connection():
     if not DATABASE_URL:
         print("LỖI: Thiếu biến môi trường DATABASE_URL!")
         sys.exit(1)
-    # Kết nối bằng chuỗi URL được cung cấp bởi Render
     conn = psycopg2.connect(DATABASE_URL) 
     return conn
 
 def init_db():
-    """Khởi tạo bảng code_status nếu chưa tồn tại."""
+    """Khởi tạo các bảng cần thiết nếu chưa tồn tại (code_status và auth_logs)."""
     if not DATABASE_URL: return
     
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Bảng code_status: lưu mã, user, thời điểm dùng, và trạng thái (ACTIVE/EXPIRED)
-        # Sử dụng status='EXPIRED' để chặn tái sử dụng vĩnh viễn
+        
+        # Bảng 1: code_status (Lưu trạng thái sử dụng của mã)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS code_status (
                 code TEXT PRIMARY KEY,
@@ -48,12 +52,67 @@ def init_db():
                 status TEXT NOT NULL
             );
         """)
+
+        # Bảng 2: auth_logs (Lưu nhật ký xác thực)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auth_logs (
+                id SERIAL PRIMARY KEY,
+                log_time TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                user_id TEXT NOT NULL,
+                code TEXT,
+                status TEXT NOT NULL
+            );
+        """)
+
         conn.commit()
         cur.close()
         conn.close()
+        print("INFO: Khởi tạo DB thành công (code_status và auth_logs).")
     except Exception as e:
         print(f"LỖI KHỞI TẠO DATABASE. Vui lòng kiểm tra lại cấu hình DB: {e}")
         sys.exit(1)
+
+def ghi_log_db(user_id, code, status):
+    """Ghi log xác thực vào bảng auth_logs trong Database và giới hạn 50 dòng."""
+    conn = None
+    cur = None
+    
+    # Sử dụng lock để đảm bảo không có hai luồng ghi/xoá log cùng lúc
+    with file_lock:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            now = datetime.now()
+            
+            # 1. INSERT log mới
+            cur.execute(
+                "INSERT INTO auth_logs (log_time, user_id, code, status) VALUES (%s, %s, %s, %s)",
+                (now, user_id, code, status)
+            )
+            
+            # 2. KIỂM TRA và DỌN DẸP nếu vượt quá MAX_LOG_ENTRIES (50)
+            cur.execute("SELECT COUNT(*) FROM auth_logs;")
+            count = cur.fetchone()[0]
+            
+            if count > MAX_LOG_ENTRIES:
+                # Xóa các log cũ nhất, chỉ giữ lại 50 log gần nhất
+                cur.execute("""
+                    DELETE FROM auth_logs
+                    WHERE id NOT IN (
+                        SELECT id 
+                        FROM auth_logs 
+                        ORDER BY log_time DESC 
+                        LIMIT %s
+                    );
+                """, (MAX_LOG_ENTRIES,))
+                
+            conn.commit()
+        except Exception as e:
+            print(f"CẢNH BÁO: Không thể ghi log vào DB: {e}")
+        finally:
+            if cur: cur.close()
+            if conn: conn.close()
+
 
 # ⭐ Tự động gọi init_db khi ứng dụng khởi động lần đầu
 with app.app_context():
@@ -62,13 +121,7 @@ with app.app_context():
 
 # --- CHỨC NĂNG FILE SYSTEM ---
 
-# Ghi log xác thực (Giữ nguyên)
-def ghi_log(user, code, status):
-    """Ghi log vào file log.txt."""
-    time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{time_str}] Người dùng: {user} | Mã: {code} | Trạng thái: {status}\n"
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(log_line)
+# Hàm ghi log cũ (ghi_log) đã được loại bỏ
 
 def xoa_ma_khoi_codes_json(code_to_delete, current_codes_list):
     """Xóa mã khỏi codes.json sau lần kích hoạt đầu tiên (Dùng 1 Lần)."""
@@ -90,6 +143,7 @@ def xoa_ma_khoi_codes_json(code_to_delete, current_codes_list):
 def check_code():
     conn = None
     cur = None
+    log_status = "Lỗi chưa xác định" # Khởi tạo để ghi log cuối cùng
     
     # Đọc codes.json (Danh sách mã CHƯA KÍCH HOẠT)
     try:
@@ -115,13 +169,12 @@ def check_code():
             db_user, db_time, db_status = db_record
 
             if db_status == 'EXPIRED':
-                # Mã đã bị đánh dấu chặn sau khi hết 24h trước đó
-                ghi_log(user, code, "❌ mã đã bị chặn vĩnh viễn")
+                log_status = "❌ mã đã bị chặn vĩnh viễn"
                 return jsonify({"status": "error", "message": "Mã đã hết hạn"}), 403
             
             # Mã ACTIVE: Kiểm tra người dùng
             if db_user != user:
-                ghi_log(user, code, "❌ mã đã bị người khác dùng")
+                log_status = "❌ mã đã bị người khác dùng"
                 return jsonify({"status": "error", "message": "Mã không hợp lệ"}), 403
             
             # Kiểm tra 24 giờ
@@ -129,16 +182,16 @@ def check_code():
                 # HẾT HẠN: Cập nhật trạng thái thành EXPIRED (Chặn vĩnh viễn)
                 cur.execute("UPDATE code_status SET status = 'EXPIRED' WHERE code = %s", (code,))
                 conn.commit()
-                ghi_log(user, code, "❌ mã đã hết hạn 24 giờ (đã chặn vĩnh viễn)")
+                log_status = "❌ mã đã hết hạn 24 giờ (đã chặn vĩnh viễn)"
                 return jsonify({"status": "error", "message": "Mã đã hết hạn"}), 403
             else:
-                ghi_log(user, code, "✅ hợp lệ (còn hạn 24 giờ)")
+                log_status = "✅ hợp lệ (còn hạn 24 giờ)"
                 return jsonify({"status": "ok", "message": "Mã hợp lệ"}), 200
 
         # --- TRƯỜNG HỢP B: MÃ CHƯA TỪNG ĐƯỢC KÍCH HOẠT (Kiểm tra codes.json) ---
         
         if code not in valid_codes_list:
-            ghi_log(user, code, "❌ mã chưa từng kích hoạt và không tồn tại")
+            log_status = "❌ mã chưa từng kích hoạt và không tồn tại"
             return jsonify({"status": "error", "message": "Mã không hợp lệ"}), 403
         
         # Mã mới và hợp lệ: Kích hoạt lần đầu
@@ -154,34 +207,67 @@ def check_code():
             )
             conn.commit()
         
-        ghi_log(user, code, "✅ hợp lệ (Lần đầu kích hoạt, đã xóa khỏi codes.json)")
+        log_status = "✅ hợp lệ (Lần đầu kích hoạt, đã xóa khỏi codes.json)"
         return jsonify({"status": "ok", "message": "Mã hợp lệ"}), 200
 
     except Exception as e:
         print(f"LỖI Server/DB: {e}")
-        ghi_log(user, code, f"❌ Lỗi server nội bộ: {e}")
+        log_status = f"❌ Lỗi server nội bộ: {e}"
         return jsonify({"status": "error", "message": "Mã không hợp lệ"}), 500
     finally:
+        # Ghi log vào Database sau khi hoàn tất xử lý
+        ghi_log_db(user, code, log_status)
         # Đảm bảo đóng kết nối DB
         if cur: cur.close()
         if conn: conn.close()
 
 
-# --- ENDPOINT LOG (Giữ nguyên) ---
+# --- ENDPOINT MỚI: XEM LOG XÁC THỰC TỪ DB (/logs) ---
 
-@app.route('/log', methods=['GET'])
-def get_log():
-    # Thêm cơ chế xác thực cho endpoint /log
+@app.route('/logs', methods=['GET'])
+def get_db_logs():
+    conn = None
+    cur = None
+    
+    # Kiểm tra mật khẩu bí mật
     secret_key = request.args.get('secret')
     if secret_key != LOG_ACCESS_SECRET:
         return jsonify({"error": "Truy cập bị từ chối"}), 403
 
     try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            content = f.read()
-        return app.response_class(content, mimetype='text/plain')
-    except:
-        return jsonify({"error": "Không có log"}), 404
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Truy vấn 30 bản ghi log gần nhất (sắp xếp theo thời gian giảm dần)
+        cur.execute("""
+            SELECT log_time, user_id, code, status
+            FROM auth_logs
+            ORDER BY log_time DESC
+            LIMIT %s;
+        """, (DISPLAY_LOG_ENTRIES,))
+        logs_raw = cur.fetchall()
+        
+        # Chuyển đổi kết quả sang định dạng JSON
+        logs = []
+        for log in logs_raw:
+            logs.append({
+                "time": log[0].strftime("%Y-%m-%d %H:%M:%S"),
+                "user_id": log[1],
+                "code": log[2] or "N/A", # Mã có thể là NULL trong một số trường hợp log
+                "status": log[3]
+            })
+
+        return jsonify({"status": "ok", "logs": logs}), 200
+    
+    except Exception as e:
+        print(f"LỖI khi truy vấn log từ DB: {e}")
+        return jsonify({"status": "error", "message": "Lỗi truy vấn log nội bộ"}), 500
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
+# --- ENDPOINT LOG CŨ (/log) BỊ LOẠI BỎ ---
 
 # Cho phép Render chạy đúng cổng
 if __name__ == '__main__':
